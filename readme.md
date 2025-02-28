@@ -1,3 +1,9 @@
+## links
+- https://grafana.com/about/grafana-stack/
+- https://grafana.com/docs/loki/latest/setup/install/docker/#install-with-docker-on-linux
+- https://grafana.com/docs/tempo/latest/getting-started/docker-example/
+- https://grafana.com/docs/tempo/latest/getting-started/instrumentation/
+
 ## start / stop
 ```
 docker compose up -d
