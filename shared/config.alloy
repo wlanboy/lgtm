@@ -1,3 +1,5 @@
+// --- Traces: OTLP empfangen und an Tempo weiterleiten ---
+
 otelcol.receiver.otlp "otlp_receiver" {
   grpc {
     endpoint = "0.0.0.0:4317"
@@ -7,16 +9,35 @@ otelcol.receiver.otlp "otlp_receiver" {
   }
 
   output {
-    traces = [otelcol.exporter.otlp.grafanacloud.input,]
+    traces = [otelcol.exporter.otlp.tempo.input]
   }
 }
 
-otelcol.exporter.otlp "grafanacloud" {
+otelcol.exporter.otlp "tempo" {
   client {
     endpoint = "tempo:4317"
     tls {
-			insecure = true
-		}
+      insecure = true
+    }
   }
 }
 
+// --- Logs: /var/log lesen und an Loki senden ---
+
+local.file_match "system_logs" {
+  path_targets = [{
+    __path__ = "/var/log/*log",
+    job      = "varlogs",
+  }]
+}
+
+loki.source.file "system_logs" {
+  targets    = local.file_match.system_logs.targets
+  forward_to = [loki.write.loki.receiver]
+}
+
+loki.write "loki" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
