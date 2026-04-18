@@ -79,19 +79,6 @@ services:
     ports:
       - "9093:9093"
 
-  alloy:
-    image: grafana/alloy:v1.15.1
-    container_name: alloy
-    volumes:
-      - ./shared/config.alloy:/etc/alloy/config.alloy
-    command:
-      - run
-      - /etc/alloy/config.alloy
-    ports:
-      - "12345:12345"  # alloy ui
-    depends_on:
-      - tempo
-
   loki:
     image: grafana/loki:3.7.1
     container_name: loki
@@ -101,12 +88,17 @@ services:
       - "3100:3100"
     command: -config.file=/mnt/config/loki-config.yaml
 
-  promtail:
-    image: grafana/promtail:3.7.1
-    container_name: promtail
+  alloy:
+    image: grafana/alloy:v1.15.1
+    container_name: alloy
     volumes:
-      - ./config:/mnt/config
+      - ./shared/config.alloy:/etc/alloy/config.alloy
       - /var/log:/var/log
+    command:
+      - run
+      - /etc/alloy/config.alloy
+    ports:
+      - "12345:12345"  # alloy ui
     depends_on:
+      - tempo
       - loki
-    command: -config.file=/mnt/config/promtail-config.yaml
