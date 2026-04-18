@@ -44,7 +44,13 @@ Anwendung / k6-tracing
 | **Alloy** | `grafana/alloy` | v1.15.1 | OTel Collector: OTLP→Tempo, Logs→Loki |
 | **Alertmanager** | `prom/alertmanager` | v0.32.0 | Alert-Routing und -Benachrichtigung |
 | **Memcached** | `memcached` | 1.6 | Cache für Tempo Frontend-Search |
-| **k6-tracing** | `xk6-client-tracing` | v0.0.9 | Synthetischer Trace-Generator |
+| **k6-tracing** *(optional)* | `xk6-client-tracing` | v0.0.9 | Synthetischer Trace-Generator |
+
+### k6-tracing (optional)
+
+`k6-tracing` sendet kontinuierlich synthetische Traces an Tempo und ist nur für Demo- und Testzwecke gedacht. Damit sind sofort Traces in Grafana sichtbar, ohne eine eigene Anwendung instrumentieren zu müssen.
+
+**Eigene Anwendungen senden Traces?** Dann `k6-tracing` aus `docker-compose.yaml` entfernen — sonst erzeugt es unnötigen Lärm in den Trace-Daten.
 
 ### Alloy als zentraler Collector
 
