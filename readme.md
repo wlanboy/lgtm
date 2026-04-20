@@ -163,6 +163,9 @@ local.file_match "my_app" {
 1. **Explore** → Datenquelle **Prometheus**
 2. Tempo-generierte Metriken z.B.: `rate(traces_spanmetrics_calls_total[5m])`
 
+### Metrik Targets überprüfen
+1. http://localhost:9090/targets öffnen
+
 ### Traces mit Metriken verknüpfen (Exemplars)
 
 Prometheus ist mit Exemplar-Support konfiguriert. In Grafana unter **Explore → Prometheus** auf den Exemplar-Punkt in einem Graph klicken um direkt zum zugehörigen Trace zu springen.
