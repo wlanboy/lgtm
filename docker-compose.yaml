@@ -97,6 +97,7 @@ services:
       - /var/log:/var/log
     command:
       - run
+      - --server.http.listen-addr=0.0.0.0:12345
       - /etc/alloy/config.alloy
     ports:
       - "12345:12345"  # alloy ui
