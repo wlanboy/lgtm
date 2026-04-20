@@ -103,7 +103,9 @@ Alloy öffnet einen OTLP-Receiver (gRPC :4317, HTTP :4318) auf jedem Node. Apps 
 | [kubernetes/namespace.yaml](kubernetes/namespace.yaml) | Namespace `monitoring` |
 | [kubernetes/rbac.yaml](kubernetes/rbac.yaml) | ServiceAccount, ClusterRole, ClusterRoleBinding |
 | [kubernetes/configmap.yaml](kubernetes/configmap.yaml) | Alloy-Konfiguration (Logs, Metriken, Traces) |
+| [kubernetes/configmap-with-istio.yaml](kubernetes/configmap-with-istio.yaml) | Alloy-Konfiguration inkl. Istio Envoy-Metriken (optional) |
 | [kubernetes/daemonset.yaml](kubernetes/daemonset.yaml) | Alloy DaemonSet (1x pro Node) |
+| [kubernetes/istio.yaml](kubernetes/istio.yaml) | Istio-Integration (optional, siehe unten) |
 
 ### Anwenden
 
@@ -159,6 +161,53 @@ Keine App-Änderung nötig. Alle Pod-Logs sind sofort in Loki verfügbar:
 
 ---
 
+## Istio (optional)
+
+Wenn Istio im Cluster installiert ist, liefert es drei zusätzliche Datenquellen ohne App-Änderungen:
+
+| Datentyp | Quelle | Ergebnis |
+|---|---|---|
+| Envoy-Metriken | Sidecar Port 15090 `/stats/prometheus` | Request-Rate, Latenz, Fehlerrate pro Service in Prometheus |
+| Distributed Traces | Istio Telemetry API -> Alloy OTLP | Vollständige Service-Mesh-Traces in Tempo |
+| Access Logs | Envoy stdout (JSON) | HTTP-Zugriffslog aller Sidecar-Verbindungen in Loki |
+
+### Vorgehen
+
+**1. Istio MeshConfig patchen** — registriert Alloy als Tracing-Provider:
+
+```bash
+kubectl patch configmap istio -n istio-system --type merge -p '
+{
+  "data": {
+    "mesh": "extensionProviders:\n- name: alloy-otlp\n  opentelemetry:\n    service: alloy-otlp.monitoring.svc.cluster.local\n    port: 4317\n"
+  }
+}'
+```
+
+> Achtung: Dieser Patch überschreibt bestehende `extensionProviders`. Bei vorhandener Mesh-Config erst lesen (`kubectl get cm istio -n istio-system -o yaml`) und manuell zusammenführen.
+
+**2. Istio-Ressourcen und ConfigMap anwenden:**
+
+```bash
+kubectl apply -f kubernetes/istio.yaml
+kubectl apply -f kubernetes/configmap-with-istio.yaml
+kubectl rollout restart daemonset/alloy -n monitoring
+```
+
+Damit werden angelegt:
+- `Service/alloy-otlp` im Namespace `monitoring` — macht Alloy clusterweit als OTLP-Endpunkt erreichbar
+- `Telemetry/tracing` in `istio-system` — aktiviert 100 % Sampling mesh-weit
+- `Telemetry/access-logs` in `istio-system` — schreibt Envoy Access Logs nach stdout (werden von Loki eingesammelt)
+
+**3. Sampling anpassen** (optional):
+
+```yaml
+# kubernetes/istio.yaml — Telemetry/tracing
+randomSamplingPercentage: 10  # 10 % für Produktion empfohlen
+```
+
+---
+
 ## Zusammenfassung
 
 | Was | Wie | Ergebnis |
@@ -167,6 +216,8 @@ Keine App-Änderung nötig. Alle Pod-Logs sind sofort in Loki verfügbar:
 | Node- & Container-Metriken | kubelet + cAdvisor per HTTPS scrape | In Prometheus unter `node_*`, `container_*` |
 | App-eigene Metriken | Annotation `prometheus.io/scrape: "true"` | In Prometheus, opt-in pro Pod |
 | Traces | OTLP an lokalen Alloy-Pod (`NODE_IP:4317`) | In Tempo, verknüpfbar mit Logs via TraceID |
+| Istio Envoy-Metriken | Sidecar Port 15090 (automatisch) | Service-Mesh-Metriken in Prometheus |
+| Istio Traces | Telemetry API -> Alloy OTLP | Mesh-weites Tracing ohne App-Änderung |
 | Alle Daten | Grafana als zentrales UI | Dashboards, Alerts, Explore über eine Oberfläche |
 
 **4 YAML-Dateien**, **1 `sed`-Befehl** für den Host, **fertig.**
