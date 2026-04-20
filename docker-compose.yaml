@@ -54,6 +54,7 @@ services:
       - --enable-feature=native-histograms
     volumes:
       - ./shared/prometheus.yaml:/etc/prometheus.yaml
+      - prometheus-data:/prometheus
     ports:
       - "9090:9090"
 
@@ -61,6 +62,7 @@ services:
     image: grafana/grafana:13.0.1
     volumes:
       - ./shared/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+      - grafana-data:/var/lib/grafana
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
@@ -74,6 +76,7 @@ services:
     container_name: alertmanager
     volumes:
       - ./config/alertmanager.yaml:/etc/alertmanager/alertmanager.yaml
+      - alertmanager-data:/alertmanager
     command:
       - --config.file=/etc/alertmanager/alertmanager.yaml
     ports:
@@ -108,3 +111,6 @@ services:
 volumes:
   loki-data:
   tempo-data:
+  prometheus-data:
+  grafana-data:
+  alertmanager-data:
