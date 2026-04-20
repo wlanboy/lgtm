@@ -128,36 +128,135 @@ kubectl -n monitoring logs -l app=alloy --tail=50
 
 ## Apps instrumentieren
 
-### Metriken (opt-in per Annotation)
+Alloy läuft bereits — Entwickler müssen nur ihr Deployment entsprechend kennzeichnen. Keine zentrale Konfigurationsänderung nötig.
+
+### Schritt 1: Label `app` setzen (Pflicht)
+
+Das Label `app` ist die wichtigste Kennung in Loki und Prometheus. Ohne es lassen sich Logs und Metriken nicht sauber einem Service zuordnen.
 
 ```yaml
+# deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  annotations:
-    prometheus.io/scrape: "true"
-    prometheus.io/port: "8080"
-    prometheus.io/path: "/metrics"   # optional, Default: /metrics
+  name: my-app
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: my-app          # muss mit template.labels übereinstimmen
+  template:
+    metadata:
+      labels:
+        app: my-app        # wird als Label in Loki und Prometheus übernommen
 ```
 
-### Traces via OTLP
+### Schritt 2: Metriken freischalten (opt-in)
+
+Annotations am Pod-Template eintragen — nicht am Deployment selbst:
 
 ```yaml
-env:
-  - name: NODE_IP
-    valueFrom:
-      fieldRef:
-        fieldPath: status.hostIP
-  - name: OTEL_EXPORTER_OTLP_ENDPOINT
-    value: "http://$(NODE_IP):4317"
+spec:
+  template:
+    metadata:
+      labels:
+        app: my-app
+      annotations:
+        prometheus.io/scrape: "true"   # aktiviert Scraping
+        prometheus.io/port: "8080"     # Port des Metrics-Endpoints
+        prometheus.io/path: "/metrics" # optional, Default: /metrics
 ```
 
-### Logs in Grafana abfragen
+Danach sind Metriken in Grafana unter **Explore → Prometheus** abfragbar:
+```
+http_requests_total{app="my-app"}
+```
 
-Keine App-Änderung nötig. Alle Pod-Logs sind sofort in Loki verfügbar:
+### Schritt 3: Traces senden (opt-in)
 
+Alloy läuft als DaemonSet auf jedem Node. Der OTLP-Endpunkt ist über `status.hostIP` erreichbar — kein Service-DNS nötig.
+
+```yaml
+spec:
+  template:
+    spec:
+      containers:
+        - name: my-app
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(NODE_IP):4317"
+            - name: OTEL_SERVICE_NAME
+              value: "my-app"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "namespace=$(MY_NAMESPACE)"
+            - name: MY_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+```
+
+Unterstützte Protokolle: gRPC (`:4317`), HTTP (`:4318`). Alle gängigen OTel-SDKs (Java, Go, Python, Node.js, .NET) funktionieren ohne weitere Konfiguration.
+
+### Schritt 4: Logs abfragen (kein Aufwand)
+
+Logs werden automatisch gesammelt — solange die App nach **stdout/stderr** schreibt. Kein Log-Agent, kein Filebeat, keine Konfiguration.
+
+In Grafana unter **Explore → Loki**:
 ```
 {namespace="default", app="my-app"}
-{namespace="default", pod=~"my-app-.*", container="main"}
+{namespace="default", app="my-app"} |= "ERROR"
+{namespace="default", app="my-app"} | json | level="error"
 ```
+
+### Vollständiges Deployment-Beispiel
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      containers:
+        - name: my-app
+          image: my-app:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://$(NODE_IP):4317"
+            - name: OTEL_SERVICE_NAME
+              value: "my-app"
+```
+
+### Übersicht: Was ist nötig?
+
+| Ziel | Aufwand | Was tun |
+|---|---|---|
+| Logs in Loki | nichts | App nach stdout schreiben (Default) |
+| Metriken in Prometheus | 2 Annotations | `prometheus.io/scrape: "true"` + Port |
+| Traces in Tempo | 2 Env-Variablen | `NODE_IP` + `OTEL_EXPORTER_OTLP_ENDPOINT` |
+| Alles filterbar | 1 Label | `app: my-app` am Pod setzen |
 
 ---
 
