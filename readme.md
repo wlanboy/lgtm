@@ -11,7 +11,7 @@ Anwendung / k6-tracing
         │
         ▼ OTLP (gRPC :4317 / HTTP :4318)
     ┌───────┐       Traces      ┌───────┐
-    │ Alloy │ ────────────────▶│ Tempo │──┐
+    │ Alloy │ ─────────────────▶│ Tempo │──┐
     └───────┘                   └───────┘  │ metrics_generator
         │ Logs (/var/log)                  ▼
         ▼                           ┌────────────┐
