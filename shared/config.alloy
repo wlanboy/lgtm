@@ -37,6 +37,29 @@ prometheus.remote_write "prometheus" {
   }
 }
 
+// --- Docker Logs: alle Container an Loki senden ---
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+loki.source.docker "docker_logs" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.docker.containers.targets
+  forward_to = [loki.write.loki.receiver]
+}
+
+// --- Docker Metriken: cAdvisor-äquivalent via cadvisor-exporter ---
+
+prometheus.exporter.cadvisor "docker_metrics" {
+  docker_host = "unix:///var/run/docker.sock"
+}
+
+prometheus.scrape "docker_metrics" {
+  targets    = prometheus.exporter.cadvisor.docker_metrics.targets
+  forward_to = [prometheus.remote_write.prometheus.receiver]
+}
+
 // --- Logs: /var/log lesen und an Loki senden ---
 
 local.file_match "system_logs" {

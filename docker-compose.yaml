@@ -98,6 +98,7 @@ services:
     volumes:
       - ./shared/config.alloy:/etc/alloy/config.alloy
       - /var/log:/var/log
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     command:
       - run
       - --server.http.listen-addr=0.0.0.0:12345
