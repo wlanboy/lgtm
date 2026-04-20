@@ -1,0 +1,57 @@
+# Service: macht Alloy OTLP-Endpoint clusterweit erreichbar (für Istio Tracing)
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy-otlp
+  namespace: monitoring
+spec:
+  selector:
+    app: alloy
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+---
+# Istio MeshConfig: registriert Alloy als OpenTelemetry-Tracing-Provider.
+# Patch auf die bestehende istio-ConfigMap in istio-system anwenden.
+# Alternativ: kubectl patch cm istio -n istio-system (siehe kubernetes.md)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: istio
+  namespace: istio-system
+data:
+  mesh: |
+    extensionProviders:
+    - name: alloy-otlp
+      opentelemetry:
+        service: alloy-otlp.monitoring.svc.cluster.local
+        port: 4317
+---
+# Telemetry: aktiviert Tracing für alle Namespaces (mesh-weit).
+# Kann auf einzelne Namespaces eingeschränkt werden (metadata.namespace setzen).
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: tracing
+  namespace: istio-system
+spec:
+  tracing:
+    - providers:
+        - name: alloy-otlp
+      randomSamplingPercentage: 100
+---
+# Telemetry: aktiviert strukturierte Access Logs für alle Workloads (JSON nach stdout).
+# Alloy liest diese über loki.source.kubernetes automatisch ein.
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: access-logs
+  namespace: istio-system
+spec:
+  accessLogging:
+    - providers:
+        - name: envoy
