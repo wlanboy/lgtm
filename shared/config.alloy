@@ -22,6 +22,21 @@ otelcol.exporter.otlp "tempo" {
   }
 }
 
+// --- Host Metrics: node-exporter-äquivalent via unix-exporter ---
+
+prometheus.exporter.unix "host" {}
+
+prometheus.scrape "host_metrics" {
+  targets    = prometheus.exporter.unix.host.targets
+  forward_to = [prometheus.remote_write.prometheus.receiver]
+}
+
+prometheus.remote_write "prometheus" {
+  endpoint {
+    url = "http://prometheus:9090/api/v1/write"
+  }
+}
+
 // --- Logs: /var/log lesen und an Loki senden ---
 
 local.file_match "system_logs" {
