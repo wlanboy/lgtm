@@ -1,0 +1,118 @@
+---
+startDelaySeconds: 0
+ssl: false
+lowercaseOutputName: false
+lowercaseOutputLabelNames: false
+
+rules:
+  # ── DataNode ─────────────────────────────────────────────────────────────
+  # DataNodeActivity-<hostname>-<port>  →  hadoop_datanode_<attr>  + Hostname label
+  - pattern: 'Hadoop<[^>]*name=DataNodeActivity-([^-,>]+)-\d+[^>]*><>([\w.]+):'
+    name: hadoop_datanode_$2
+    labels:
+      Hostname: "$1"
+    type: GAUGE
+
+  # DataNodeInfo
+  - pattern: 'Hadoop<[^>]*name=DataNodeInfo[^>]*><>([\w.]+):'
+    name: hadoop_datanode_$1
+    type: GAUGE
+
+  # FSDatasetState (mit oder ohne UUID)
+  - pattern: 'Hadoop<[^>]*name=FSDatasetState(?:-[a-f0-9-]+)?[^>]*><>([\w.]+):'
+    name: hadoop_datanode_$1
+    type: GAUGE
+
+  # DataNodeVolume  →  hadoop_fsvolume_<attr>  + Volume-Label aus Bean-Namen
+  # Bean: Hadoop:service=DataNode,name=DataNodeVolume-/data/hdfs/datanode
+  # Gruppe 1 = Volume-Pfad, Gruppe 2 = Attributname
+  - pattern: 'Hadoop<[^>]*name=DataNodeVolume-([^,>]+)[^>]*><>([A-Z]\w+):'
+    name: hadoop_fsvolume_$2
+    labels:
+      Volume: "$1"
+    type: GAUGE
+
+  # ── NameNode ─────────────────────────────────────────────────────────────
+  # NameNodeActivity  →  hadoop_namenode_<attr>
+  # [^>]* statt .+ damit der Match auch greift wenn NameNodeActivity das letzte
+  # Property im ObjectName ist und kein Trailing-Content vor > vorhanden ist.
+  # [A-Z]\w+ schließt tag.*-String-Attribute aus, die keinen gültigen Metriknamen ergeben.
+  - pattern: 'Hadoop<[^>]*name=NameNodeActivity[^>]*><>([A-Z]\w+):'
+    name: hadoop_namenode_$1
+    type: GAUGE
+
+  # FSNamesystemState  →  hadoop_fsnamesystem_<attr>  (Kapazität, Blöcke, DataNode-Counts)
+  - pattern: 'Hadoop<[^>]*name=FSNamesystemState[^>]*><>([A-Z]\w+):'
+    name: hadoop_fsnamesystem_$1
+    type: GAUGE
+
+  # FSNamesystem (ohne State) → Attribute, die NUR in diesem Bean liegen
+  # (?!State) verhindert Überschneidung mit FSNamesystemState.
+  # Whitelist vermeidet doppelte Zeitreihen für Attrs die in beiden Beans vorkommen.
+  - pattern: 'Hadoop<[^>]*name=FSNamesystem(?!State)[^>]*><>(TransactionsSinceLastCheckpoint|TransactionsSinceLastLogRoll|LastCheckpointTime|LockQueueLength|NumActiveClients|NumFilesUnderConstruction|MissingBlocks|ExpiredHeartbeats|CapacityTotalGB|CapacityUsedGB|CapacityRemainingGB|MillisSinceLastLoadedEdits|CorruptBlocks|StaleDataNodes):'
+    name: hadoop_fsnamesystem_$1
+    type: GAUGE
+
+  # NameNodeStatus → HA-Zustand: 1=aktiv, 0=standby
+  # Zwei Muster weil der Exporter String-Werte nicht direkt als Zahl exportieren kann.
+  - pattern: 'Hadoop<[^>]*name=NameNodeStatus[^>]*><>State: active'
+    name: hadoop_namenode_ha_active
+    value: 1
+    type: GAUGE
+  - pattern: 'Hadoop<[^>]*name=NameNodeStatus[^>]*><>State: standby'
+    name: hadoop_namenode_ha_active
+    value: 0
+    type: GAUGE
+
+  # RetryCache  →  hadoop_retrycache_<attr>
+  - pattern: 'Hadoop<[^>]*name=RetryCache\.\w+[^>]*><>([\w.]+):'
+    name: hadoop_retrycache_$1
+    type: GAUGE
+
+  # ── JournalNode ──────────────────────────────────────────────────────────
+  # Journal-<namespace>  →  hadoop_journalnode_<attr>
+  - pattern: 'Hadoop<[^>]*name=Journal-\w+[^>]*><>([\w.]+):'
+    name: hadoop_journalnode_$1
+    type: GAUGE
+
+  # ── YARN / ResourceManager ───────────────────────────────────────────────
+  # ClusterMetrics  →  hadoop_yarn_clustermetrics_<attr>
+  - pattern: 'Hadoop<[^>]*name=ClusterMetrics[^>]*><>([\w.]+):'
+    name: hadoop_yarn_clustermetrics_$1
+    type: GAUGE
+
+  # QueueMetrics mit Queue-Labels  →  hadoop_yarn_queue_<attr>
+  - pattern: 'Hadoop<[^>]*name=QueueMetrics[^>]*q0=(\w+)(?:[^>]*q1=(\w+))?[^>]*><>([\w.]+):'
+    name: hadoop_yarn_queue_$3
+    labels:
+      q0: "$1"
+      q1: "$2"
+    type: GAUGE
+
+  # ── NodeManager ──────────────────────────────────────────────────────────
+  # NodeManagerMetrics  →  hadoop_nodemanager_<attr>
+  - pattern: 'Hadoop<[^>]*name=NodeManagerMetrics[^>]*><>([\w.]+):'
+    name: hadoop_nodemanager_$1
+    type: GAUGE
+
+  # ── Gemeinsam (alle Dienste) ─────────────────────────────────────────────
+  # JvmMetrics  →  hadoop_jvm_<attr>
+  # [^>]* behebt das trailing-.+-Problem (JvmMetrics ist letztes Property im ObjectName).
+  # [A-Z]\w+ schließt tag.*-String-Attribute (ProcessName, Hostname, ...) aus.
+  - pattern: 'Hadoop<[^>]*name=JvmMetrics[^>]*><>([A-Z]\w+):'
+    name: hadoop_jvm_$1
+    type: GAUGE
+
+  # RpcDetailedActivity (vor RpcActivity matchen, da spezifischer)
+  - pattern: 'Hadoop<[^>]*name=RpcDetailedActivityForPort(\d+)[^>]*><>([\w.]+):'
+    name: hadoop_rpcdetailed_$2
+    labels:
+      port: "$1"
+    type: GAUGE
+
+  # RpcActivity
+  - pattern: 'Hadoop<[^>]*name=RpcActivityForPort(\d+)[^>]*><>([\w.]+):'
+    name: hadoop_rpc_$2
+    labels:
+      port: "$1"
+    type: GAUGE
