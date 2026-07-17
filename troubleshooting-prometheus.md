@@ -159,7 +159,69 @@ prometheus_tsdb_wal_corruptions_total
 
 ---
 
-## 7. Eskalationskriterien
+## 7. Kubernetes: Cluster-Metriken fehlen
+
+Bezug: [kubernetes.md](kubernetes.md). Dieser Stack betreibt **kein** In-Cluster-Prometheus — der Alloy-DaemonSet-Pod pro Node scraped kubelet (`:10250`), cAdvisor (`/metrics/cadvisor`) und annotierte App-Pods lokal und schreibt die Daten per `remote_write` direkt in den externen Prometheus. Das heißt auch: **K8s-Targets erscheinen nicht unter `/targets`** — dort steht nur der eigene `prometheus`/`tempo`/`loki`/`alloy`-Scrape aus [shared/prometheus.yaml](shared/prometheus.yaml). Für Kubernetes-Metriken muss stattdessen über PromQL geprüft werden, ob aktuelle Serien ankommen.
+
+**Checkliste:**
+
+1. **Kommen überhaupt Kubernetes-Metriken per Remote-Write an?**
+   ```promql
+   # Alter der letzten Node-Metrik (sollte wenige Sekunden/Minuten sein)
+   time() - max(node_time_seconds)
+   # oder: existieren kubelet/cadvisor-Serien überhaupt?
+   count(up{job=~".*kubelet.*|.*cadvisor.*"})
+   ```
+   Fehlen Serien komplett: `<LGTM-HOST>`-Platzhalter in [kubernetes/configmap.yaml](kubernetes/configmap.yaml) prüfen — das ist laut Deployment-Anleitung die häufigste Ursache.
+   ```bash
+   kubectl -n monitoring get cm alloy-config -o yaml | grep -i "9090\|remote_write"
+   ```
+
+2. **RBAC für kubelet/cAdvisor-Scrape korrekt?**
+   Die ClusterRole erlaubt `get` auf die `nonResourceURLs` `/metrics` und `/metrics/cadvisor` sowie `get`/`list`/`watch` auf `nodes`, `nodes/metrics`, `nodes/proxy`:
+   ```bash
+   kubectl auth can-i get /metrics/cadvisor --as=system:serviceaccount:monitoring:alloy
+   ```
+
+3. **Alloy-Pod-Logs auf Scrape- oder Remote-Write-Fehler prüfen:**
+   ```bash
+   kubectl -n monitoring logs -l app=alloy --tail=200 | grep -i "remote_write\|kubelet\|cadvisor\|x509"
+   ```
+   `x509`/TLS-Fehler deuten auf das selbstsignierte kubelet-Zertifikat hin — je nach Cluster muss die Alloy-Konfiguration `insecure_skip_verify` oder das CA-Bundle des Clusters nutzen.
+
+4. **Netzwerkpfad Alloy-Pod → Prometheus-Host offen?**
+   ```bash
+   kubectl -n monitoring exec -it <alloy-pod> -- nc -zv <LGTM-HOST> 9090
+   ```
+   Gleicher Check wie beim manuellen Remote-Write-Test in [readme.md](readme.md#prometheus-remote-write-schlägt-fehl-kubernetes), nur aus dem Pod statt vom Node ausgeführt.
+
+5. **App-eigene Metriken fehlen trotz erwarteter Annotation?**
+   Häufigster Fehler: Annotation steht am `Deployment` statt am Pod-Template.
+   ```bash
+   kubectl get pod <pod> -o jsonpath='{.metadata.annotations}'
+   ```
+   Muss `prometheus.io/scrape: "true"` und `prometheus.io/port` enthalten (siehe [kubernetes.md](kubernetes.md#schritt-2-metriken-freischalten-opt-in)).
+
+6. **Istio Envoy-Metriken fehlen?**
+   Prüfen, ob `configmap-with-istio.yaml` (statt der Standard-ConfigMap) angewendet wurde und Sidecar-Port `15090` je Pod erreichbar ist:
+   ```bash
+   kubectl exec <pod> -c istio-proxy -- curl -s localhost:15090/stats/prometheus | head
+   ```
+
+**Bekannte Fehlerbilder (Kubernetes-spezifisch):**
+
+| Symptom | Wahrscheinliche Ursache | Maßnahme |
+|---|---|---|
+| Gar keine Cluster-Metriken (Node/Container) | `<LGTM-HOST>` in `configmap.yaml` nicht ersetzt | ConfigMap korrigieren, Alloy-DaemonSet neu ausrollen |
+| Nur Node-, keine Container-Metriken | cAdvisor-`nonResourceURL`-Recht fehlt oder Pfad falsch | RBAC (`rbac.yaml`) und Scrape-Pfad in `configmap.yaml` prüfen |
+| App-Metriken fehlen trotz Annotation | Annotation am Deployment statt am Pod-Template gesetzt | Annotation unter `spec.template.metadata.annotations` verschieben |
+| TLS-/x509-Fehler in Alloy-Logs beim kubelet-Scrape | Selbstsigniertes kubelet-Zertifikat nicht vertraut | TLS-Konfiguration des Scrape-Targets in `configmap.yaml` anpassen |
+| Doppelte/kurzzeitig inkonsistente Serien bei DaemonSet-Rollout | Alter und neuer Alloy-Pod kurzzeitig beide aktiv | Erwartetes, temporäres Verhalten — kein Handlungsbedarf |
+| Istio-Envoy-Metriken fehlen | `configmap-with-istio.yaml` nicht angewendet oder Sidecar-Port nicht erreichbar | Konfiguration gemäß [kubernetes.md](kubernetes.md#istio-optional) anwenden |
+
+---
+
+## 8. Eskalationskriterien
 
 - Wiederholte OOM-Kills trotz identifizierter und bereinigter Cardinality-Quelle
 - WAL-Korruption, die automatische Reparatur nicht beheben kann und Datenverlust droht
@@ -169,6 +231,7 @@ prometheus_tsdb_wal_corruptions_total
 
 ## Links
 
+- [Kubernetes-Anbindung dieses Stacks](kubernetes.md)
 - [Troubleshooting Common Prometheus Pitfalls (Last9)](https://last9.io/blog/troubleshooting-common-prometheus-pitfalls-cardinality-resource-utilization-and-storage-challenges/)
 - [High Cardinality in Prometheus: How to Find and Fix It (Last9)](https://last9.io/blog/how-to-manage-high-cardinality-metrics-in-prometheus/)
 - [Prometheus WAL Replay: When Your Metrics Database Can't Start Fast Enough](https://blog.landryzetam.net/posts/prometheus-wal-replay/)

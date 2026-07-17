@@ -109,7 +109,59 @@ docker compose exec tempo sh -c "nc -zv memcached 11211"
 
 ---
 
-## 5. Eskalationskriterien
+## 5. Kubernetes: Traces aus dem Cluster fehlen
+
+Bezug: [kubernetes.md](kubernetes.md). Apps im Cluster senden Traces **nicht** an Tempo direkt, sondern an den lokalen Alloy-Pod auf ihrem Node (`$(NODE_IP):4317`), der sie an den externen Tempo (Docker-Host) weiterleitet.
+
+**Checkliste:**
+
+1. **Laufen die Alloy-DaemonSet-Pods auf allen Nodes?**
+   ```bash
+   kubectl -n monitoring get pods -l app=alloy -o wide
+   ```
+   Ein Pod pro Node erwartet. Fehlt einer, sendet keine App auf diesem Node erfolgreich Traces (Tolerations sind bereits auf `operator: Exists` gesetzt, decken also alle Taints ab — Pending-Pods deuten eher auf Ressourcen- oder Image-Pull-Probleme hin).
+
+2. **Ist der `<LGTM-HOST>`-Platzhalter in der ConfigMap tatsächlich ersetzt?**
+   ```bash
+   kubectl -n monitoring get cm alloy-config -o yaml | grep -i "4317\|otlp"
+   ```
+   Größter Stolperstein laut Deployment-Anleitung: Wird `<LGTM-HOST>` vergessen zu ersetzen, landet nichts beim Tempo-Backend.
+
+3. **Setzt die App wirklich `NODE_IP` (`status.hostIP`) statt einer festen Adresse?**
+   ```bash
+   kubectl exec <app-pod> -- env | grep -E "NODE_IP|OTEL_EXPORTER_OTLP_ENDPOINT"
+   ```
+   Eine hartkodierte Adresse funktioniert nur zufällig auf einem Node und erklärt "Traces kommen nur von manchen Pods an".
+
+4. **Netzwerkpfad Alloy-Pod → Tempo-Host offen?**
+   ```bash
+   kubectl -n monitoring exec -it <alloy-pod> -- nc -zv <LGTM-HOST> 4317
+   ```
+   Firewall/Security-Group zwischen Cluster-Nodes und Docker-Host prüfen (analog zum Prometheus-Remote-Write-Check in [troubleshooting-prometheus.md](troubleshooting-prometheus.md)).
+
+5. **Alloy-Pod-Logs auf OTLP-Fehler prüfen:**
+   ```bash
+   kubectl -n monitoring logs -l app=alloy --tail=200 | grep -i "otlp\|refused\|failed"
+   ```
+
+6. **Bei Istio-Integration:** Prüfen, ob der MeshConfig-Patch tatsächlich angewendet wurde und nicht durch eine spätere Änderung überschrieben ist:
+   ```bash
+   kubectl get cm istio -n istio-system -o yaml | grep -A5 extensionProviders
+   kubectl get telemetry -n istio-system
+   ```
+
+**Bekannte Fehlerbilder (Kubernetes-spezifisch):**
+
+| Symptom | Wahrscheinliche Ursache | Maßnahme |
+|---|---|---|
+| Gar keine Traces aus dem Cluster | `<LGTM-HOST>` in `configmap.yaml` nicht ersetzt | ConfigMap prüfen, `kubectl apply -f kubernetes/configmap.yaml`, Alloy-Pods rollen (`kubectl rollout restart daemonset/alloy -n monitoring`) |
+| Traces nur von einzelnen Pods/Nodes | App nutzt feste Adresse statt `$(NODE_IP):4317` | Deployment auf `status.hostIP`-Pattern umstellen (siehe [kubernetes.md](kubernetes.md#schritt-3-traces-senden-opt-in)) |
+| Istio-Mesh-Traces fehlen trotz funktionierender App-Traces | MeshConfig-Patch nicht aktiv oder überschrieben | `extensionProviders` in der Istio-ConfigMap erneut setzen, DaemonSet-Rollout abwarten |
+| Alloy-Pod auf einem Node crasht/restart-loop | Portkonflikt auf 4317/4318/12345 mit anderem Prozess des Nodes | `kubectl -n monitoring describe pod <alloy-pod>`, belegte Ports auf dem Node prüfen |
+
+---
+
+## 6. Eskalationskriterien
 
 - Datenverlust durch korrupte Blöcke oder versehentliches `docker compose down -v`
 - Anhaltende `tempo_receiver_refused_spans` trotz angepasster Limits → Kapazitätsproblem, Skalierung prüfen
@@ -119,6 +171,7 @@ docker compose exec tempo sh -c "nc -zv memcached 11211"
 
 ## Links
 
+- [Kubernetes-Anbindung dieses Stacks](kubernetes.md)
 - [Troubleshoot Tempo (offizielle Doku)](https://grafana.com/docs/tempo/latest/troubleshooting/)
 - [Unable to find traces](https://grafana.com/docs/tempo/latest/troubleshooting/querying/unable-to-see-trace/)
 - [Troubleshoot Tempo data source in Grafana](https://grafana.com/docs/grafana/latest/datasources/tempo/troubleshooting/)

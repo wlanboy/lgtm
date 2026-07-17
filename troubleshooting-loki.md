@@ -112,7 +112,54 @@ loki_ingester_memory_streams             # aktuell aktive Streams im Speicher
 
 ---
 
-## 6. Eskalationskriterien
+## 6. Kubernetes: Pod-Logs fehlen
+
+Bezug: [kubernetes.md](kubernetes.md). Der Alloy-DaemonSet-Pod pro Node liest Pod-Logs **nicht** über das Dateisystem, sondern über die Komponente `loki.source.kubernetes`, die direkt gegen die Kubernetes-API streamt. Dafür braucht der ServiceAccount `alloy` Leserechte auf Pods (siehe [kubernetes/rbac.yaml](kubernetes/rbac.yaml)).
+
+**Checkliste:**
+
+1. **RBAC ausreichend?**
+   ```bash
+   kubectl auth can-i list pods --as=system:serviceaccount:monitoring:alloy -A
+   kubectl auth can-i watch pods --as=system:serviceaccount:monitoring:alloy -A
+   ```
+   Beide müssen `yes` liefern. Die ClusterRole gewährt bewusst nur `get`/`list`/`watch` — reicht für das Log-Streaming aus, aber ein `no` bedeutet meist eine nicht angewendete oder überschriebene `ClusterRoleBinding`.
+
+2. **Schreibt die App wirklich nach stdout/stderr?**
+   Kein Log-Agent liest Dateien im Container — Logs, die eine App nur in eine lokale Datei schreibt, kommen grundsätzlich nicht in Loki an.
+
+3. **Sind `namespace`/`app`-Labels am Pod gesetzt?**
+   Ohne das Label `app` im Pod-Template (siehe [kubernetes.md](kubernetes.md#schritt-1-label-app-setzen-pflicht)) lassen sich die Logs in Loki zwar finden, aber nicht sauber nach Service filtern.
+
+4. **Ist der `<LGTM-HOST>`-Platzhalter in der ConfigMap für das Loki-Ziel ersetzt?**
+   ```bash
+   kubectl -n monitoring get cm alloy-config -o yaml | grep -i "3100\|loki"
+   ```
+
+5. **Netzwerkpfad Alloy-Pod → Loki-Host offen?**
+   ```bash
+   kubectl -n monitoring exec -it <alloy-pod> -- nc -zv <LGTM-HOST> 3100
+   ```
+
+6. **Alloy-Pod-Logs auf Kubernetes-API- oder Push-Fehler prüfen:**
+   ```bash
+   kubectl -n monitoring logs -l app=alloy --tail=200 | grep -i "kubernetes\|429\|push"
+   ```
+   HTTP 429 hier hat dieselbe Ursache wie im Docker-Compose-Betrieb (Abschnitt 2) — z. B. ein einzelner crashloopender Pod, der in Sekunden zehntausende Log-Zeilen erzeugt.
+
+**Bekannte Fehlerbilder (Kubernetes-spezifisch):**
+
+| Symptom | Wahrscheinliche Ursache | Maßnahme |
+|---|---|---|
+| Gar keine Pod-Logs aus dem Cluster | `<LGTM-HOST>` in `configmap.yaml` nicht ersetzt oder RBAC fehlt | ConfigMap und `kubectl auth can-i` prüfen, Alloy-Pods rollen |
+| Logs eines einzelnen Namespace fehlen komplett | Selector/Discovery in `configmap.yaml` grenzt Namespace unbeabsichtigt ein | `loki.source.kubernetes`-Konfiguration in der ConfigMap auf Namespace-Filter prüfen |
+| Logs ohne `app`-Label, schwer filterbar | Label fehlt im Pod-Template (nur am Deployment gesetzt) | Deployment korrigieren, `template.metadata.labels.app` ergänzen |
+| Alloy-Pod restart-loop bei sehr großen Clustern | Kubernetes-API-Last durch `list`/`watch` auf sehr viele Pods/Namespaces | Ressourcenlimits des Alloy-Pods erhöhen, ggf. Discovery auf relevante Namespaces eingrenzen |
+| Log-Zeilen doppelt nach Pod-Neustart | Normales Verhalten beim Owner-Wechsel des Streams, kein Bug | Kein Handlungsbedarf |
+
+---
+
+## 7. Eskalationskriterien
 
 - Anhaltender Datenverlust durch `loki_discarded_samples_total` trotz korrigierter Limits
 - Wiederkehrende OOM-Kills durch Stream-Cardinality trotz Label-Bereinigung
@@ -122,6 +169,7 @@ loki_ingester_memory_streams             # aktuell aktive Streams im Speicher
 
 ## Links
 
+- [Kubernetes-Anbindung dieses Stacks](kubernetes.md)
 - [Manage and debug errors (Loki Doku)](https://grafana.com/docs/loki/latest/operations/troubleshooting/)
 - [Troubleshoot log ingestion (WRITE)](https://grafana.com/docs/loki/latest/operations/troubleshooting/troubleshoot-ingest/)
 - [Troubleshoot log queries (READ)](https://grafana.com/docs/loki/latest/query/troubleshoot-query/)
