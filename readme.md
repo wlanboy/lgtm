@@ -289,7 +289,7 @@ receivers:
 
 Für die Anbindung eines Kubernetes-Clusters an diesen Stack siehe [kubernetes.md](kubernetes.md).
 
-Kurzzusammenfassung: Grafana Alloy wird als DaemonSet im Cluster deployed und sendet Logs, Metriken und Traces an den laufenden Docker-Stack. Vier YAML-Dateien unter [kubernetes/](kubernetes/) sind deployfertig vorbereitet.
+Kurzzusammenfassung: Grafana Alloy wird als DaemonSet im Cluster deployed und sendet Logs, Metriken und Traces an den laufenden Docker-Stack. Vier YAML-Dateien unter [kubernetes/](kubernetes/) sind deployfertig vorbereitet — alternativ als Helm-Chart unter [helm/alloy-lgtm/](helm/alloy-lgtm/).
 
 ---
 
@@ -313,6 +313,8 @@ Kurzzusammenfassung: Grafana Alloy wird als DaemonSet im Cluster deployed und se
 │   ├── configmap-with-istio.yaml # Alloy-Config inkl. Istio
 │   ├── daemonset.yaml          # Alloy DaemonSet
 │   └── istio.yaml              # Istio Telemetry + Service (optional)
+├── helm/
+│   └── alloy-lgtm/             # Helm-Chart-Äquivalent zu kubernetes/
 └── docker-compose.yaml
 ```
 
@@ -381,8 +383,8 @@ curl -v http://<LGTM-HOST>:9090/-/healthy
 
 - [Grafana Stack Übersicht](https://grafana.com/about/grafana-stack/)
 - [Alloy Dokumentation](https://grafana.com/docs/alloy/latest/)
-- [Loki Docker Setup](https://grafana.com/docs/loki/latest/setup/install/docker/)
-- [Tempo Getting Started](https://grafana.com/docs/tempo/latest/getting-started/docker-example/)
+- [Loki Setup](https://grafana.com/docs/loki/latest/setup/)
+- [Tempo Getting Started](https://grafana.com/docs/tempo/latest/getting-started/)
 - [Tempo Instrumentation](https://grafana.com/docs/tempo/latest/getting-started/instrumentation/)
 - [Prometheus Remote Write](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_write)
 - [OpenTelemetry Protokoll](https://opentelemetry.io/docs/specs/otlp/)
