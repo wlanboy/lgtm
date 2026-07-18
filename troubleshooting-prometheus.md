@@ -221,10 +221,130 @@ Bezug: [kubernetes.md](kubernetes.md). Dieser Stack betreibt **kein** In-Cluster
 
 ---
 
-## 8. Eskalationskriterien
+## 8. Deep Dive: High Cardinality vermeiden und beheben
+
+Abschnitt 2 behandelt die Akutmaßnahmen bei OOM durch Cardinality. Dieser Abschnitt geht auf Ursachen und nachhaltige Gegenmaßnahmen ein.
+
+### Ursachen
+
+Hohe Cardinality entsteht fast immer durch **unbegrenzte Labels** — Werte, deren Anzahl möglicher Ausprägungen nicht begrenzt ist:
+
+- User-IDs, E-Mail-Adressen, Session-Tokens als Label-Wert
+- Rohe URL-Pfade statt normalisierter Routen (`/api/users/12345` statt `/api/users/:id`)
+- Container-/Pod-IDs, die bei jedem Deployment oder Autoscaling-Event neu vergeben werden
+- Kubernetes verschärft das zusätzlich: Jede Metrik bekommt automatisch `pod`, `namespace`, `instance` u. Ä. angehängt — bei häufigen Rollouts/Scaling entstehen laufend neue Serien-Kombinationen, während alte "verwaisen" (aber bis zum Ablauf der Retention gespeichert bleiben)
+
+### Erkennung
+
+1. **TSDB-Status-API** — liefert direkt die Top-10-Metriken nach Serienanzahl, ohne teure PromQL-Query:
+   ```bash
+   curl -s http://localhost:9090/api/v1/status/tsdb | jq
+   ```
+
+2. **PromQL** — welches Label treibt die Cardinality einer bestimmten Metrik:
+   ```promql
+   # Wie viele unterschiedliche Werte hat label_x bei metric_name?
+   count(count by (label_x)(metric_name))
+   ```
+   Ergänzt die bereits in Abschnitt 2 genannten Queries (`topk(10, count by (__name__)(...))` je Metrikname, `count by (job)(...)` je Job).
+
+3. **Grafana-Dashboards** — offizielle "Prometheus Stats"-Dashboards (IDs `1860` bzw. `3662`) importieren, um Cardinality-Trends visuell statt per Ad-hoc-Query zu beobachten.
+
+### Gegenmaßnahmen
+
+**Relabeling an der Quelle** (`metric_relabel_configs` in [shared/prometheus.yaml](shared/prometheus.yaml)):
+- `labeldrop` — unnötiges Label komplett entfernen
+- `labelkeep` — nur explizit benötigte Labels behalten, Rest verwerfen
+- Value-Bucketing per Regex-Capture-Group — z. B. Pfad-IDs auf ein Muster normalisieren (`/api/users/<id>` → `/api/users/:id`), statt den Rohwert als Label zu übernehmen
+
+**Scrape-Guards** (Schutz vor einer einzelnen fehlkonfigurierten Instrumentierung, die den ganzen Scrape sprengt):
+- `sample_limit` — Scrape schlägt fehl, sobald die Sample-Anzahl den Grenzwert übersteigt (verhindert, dass eine einzelne Quelle die TSDB flutet)
+- `label_limit` / `label_name_length_limit` — begrenzen Anzahl bzw. Länge der Labels pro Serie
+
+**Aggregation statt Rohdaten:**
+- Recording Rules verdichten hochauflösende/hochkardinale Rohserien zu vorberechneten Aggregaten (siehe auch Abschnitt 4 zu Query-Performance)
+- Native Histograms (`--enable-feature=native-histograms`, in diesem Stack bereits aktiv, siehe Kopf dieses Dokuments) fassen die Bucket-Verteilung in einer einzigen Serie mit dynamischen Buckets zusammen, statt pro `le`-Bucket eine eigene Serie zu erzeugen — reduziert Histogram-Cardinality drastisch
+
+**Kubernetes-spezifisch:**
+- Nicht benötigte Workloads gar nicht erst scrapen: `prometheus.io/scrape: "false"` bzw. entsprechendes Discovery-Relabeling, statt Serien erst zu erzeugen und danach wegzufiltern
+
+---
+
+## 9. Deep Dive: WAL Replay – Wenn der Start zu lange dauert
+
+Abschnitt 3 behandelt WAL-Korruption und Crash-Loops kurz. Dieser Abschnitt vertieft **WAL-Replay-Dauer** als eigenständige Störungsursache — auch ohne jede Korruption kann ein normaler, aber sehr großer WAL den Start so lange verzögern, dass Healthcheck bzw. Startup-Probe den Container vorher tötet. Basierend auf: [Prometheus WAL Replay: When Your Metrics Database Can't Start Fast Enough](https://blog.landryzetam.net/posts/prometheus-wal-replay/).
+
+### Was ist der WAL?
+
+Der Write-Ahead Log ist der Durability-Mechanismus von Prometheus: Jeder eingehende Sample wird zuerst in den WAL geschrieben, bevor er periodisch in Blöcke auf Disk kompaktiert wird. Segmente sind i. d. R. 128 MB groß; ihre Anzahl wächst mit Retention, Cardinality und Scrape-Frequenz. Beim Start muss Prometheus alle noch nicht kompaktierten WAL-Segmente sequentiell einlesen ("Replay"), bevor es Traffic annehmen kann.
+
+### Symptom
+
+Kein Fehler, keine Korruption — der Prozess arbeitet einfach zu lange:
+
+- Logs zeigen fortlaufendes, aber nicht abschließendes Laden von Segmenten
+- Startup-/Liveness-Probe schlägt mit `503` fehl, bevor der Replay fertig ist
+- Orchestrator (Kubernetes, Docker) killt und startet den Container neu → **Crash-Loop, obwohl der WAL intakt ist** und jeder Versuch wieder von vorne beginnt
+- Dokumentierter Praxisfall aus dem oben verlinkten Artikel: 4.415 Segmente à ca. 3s Ladezeit ≈ 3,7 Stunden Replay-Zeit, bei einem Default-Timeout von 600s → 90+ Neustarts in 37 Stunden, ohne dass der Start je durchlief
+
+### Diagnose
+
+1. **Anzahl WAL-Segmente zählen** (im `prometheus-data`-Volume bzw. Pod):
+   ```bash
+   docker compose exec prometheus sh -c 'ls /prometheus/wal | wc -l'
+   # Kubernetes:
+   kubectl exec <prometheus-pod> -- sh -c 'ls /prometheus/wal | wc -l'
+   ```
+   Deutlich mehr als ein paar hundert Segmente (à 128 MB) ist ein Warnsignal.
+
+2. **Tatsächliche Replay-Dauer aus den Logs rekonstruieren** — Zeitstempel des ersten und letzten geloggten Segment-Load vergleichen:
+   ```bash
+   docker compose logs prometheus | grep -i "segment\|wal"
+   ```
+
+3. **Abgrenzung zu Abschnitt 3:** Kein `corrupt`/`err` in den Logs → reines Laufzeitproblem, keine Reparatur nötig, nur Zeit.
+
+### Sofortmaßnahme: Timeout erhöhen
+
+Der Container braucht schlicht mehr Zeit, bevor der Orchestrator ihn tötet:
+
+- **Docker Compose:** `healthcheck.start_period`/`timeout`/`retries` in der Compose-Datei entsprechend hoch setzen (siehe auch Abschnitt 3, Punkt 3)
+- **Kubernetes mit Prometheus Operator:**
+  ```yaml
+  prometheus:
+    prometheusSpec:
+      maximumStartupDurationSeconds: 15000   # ~4,2h statt Default 600s
+  ```
+  Wert großzügig über der gemessenen Replay-Dauer wählen — ein zu knapper Wert reproduziert exakt dieses Problem erneut.
+
+### Nachhaltige Behebung: WAL klein halten
+
+Der Timeout ist nur Symptombekämpfung. Um zu verhindern, dass der WAL überhaupt so groß wird:
+
+- **Retention reduzieren** — `--storage.tsdb.retention.time` senken, falls unnötig lang (30+ Tage sind ein bekannter Auslöser)
+- **Scrape-Intervall vergrößern** — 15s → 30s halbiert das Datenvolumen und damit die WAL-Wachstumsrate
+- **Cardinality begrenzen** — siehe Abschnitt 8; hohe Cardinality füllt den WAL genauso wie eine hohe Scrape-Frequenz
+- **Unnötige Metriken droppen** — `metric_relabel_configs` in [shared/prometheus.yaml](shared/prometheus.yaml), analog zu Abschnitt 8
+- **Langzeitspeicherung auslagern** — bei Bedarf an sehr langer Historie eher Remote-Write an ein Langzeitsystem (Thanos, Cortex/Mimir) als lokale Retention hochzudrehen
+
+### Zusammenhang mit Abschnitt 3
+
+Abschnitt 3 und dieser Abschnitt sind zwei verschiedene Ursachen für denselben äußeren Effekt ("Prometheus startet nicht neu"):
+
+| | Abschnitt 3: WAL-Korruption | Abschnitt 9: WAL zu groß |
+|---|---|---|
+| Logs | `corrupt`/`err` sichtbar | unauffällig, nur langsam |
+| Ursache | unsauberes Shutdown, Disk-Fehler | lange Retention, hohe Cardinality/Scrape-Rate |
+| Fix | automatische Kürzung, ggf. manuelles Entfernen betroffener Segmente | Timeout erhöhen + WAL-Wachstum langfristig reduzieren |
+| Kennzahl | `prometheus_tsdb_wal_corruptions_total` | Segment-Anzahl in `/prometheus/wal`, Zeit zwischen erstem/letztem Segment-Log |
+
+---
+
+## 10. Eskalationskriterien
 
 - Wiederholte OOM-Kills trotz identifizierter und bereinigter Cardinality-Quelle
 - WAL-Korruption, die automatische Reparatur nicht beheben kann und Datenverlust droht
+- Anhaltender Crash-Loop durch zu lange WAL-Replay-Zeit trotz erhöhtem Startup-Timeout (Abschnitt 9)
 - Remote-Write-Ausfälle, die Alerting-Fähigkeit (Alertmanager-Routing) beeinträchtigen
 
 ---
@@ -232,8 +352,4 @@ Bezug: [kubernetes.md](kubernetes.md). Dieser Stack betreibt **kein** In-Cluster
 ## Links
 
 - [Kubernetes-Anbindung dieses Stacks](kubernetes.md)
-- [Troubleshooting Common Prometheus Pitfalls (Last9)](https://last9.io/blog/troubleshooting-common-prometheus-pitfalls-cardinality-resource-utilization-and-storage-challenges/)
-- [High Cardinality in Prometheus: How to Find and Fix It (Last9)](https://last9.io/blog/how-to-manage-high-cardinality-metrics-in-prometheus/)
-- [Prometheus WAL Replay: When Your Metrics Database Can't Start Fast Enough](https://blog.landryzetam.net/posts/prometheus-wal-replay/)
-- [Prometheus went OOM potentially because of expensive query (GitHub Discussion)](https://github.com/prometheus/prometheus/discussions/14397)
 - [Prometheus Remote Write Konfiguration (offizielle Doku)](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_write)
