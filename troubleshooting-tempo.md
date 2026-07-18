@@ -15,7 +15,9 @@ Relevante Endpunkte in diesem Setup:
 | Alloy Pipeline UI | http://localhost:12345 |
 | Memcached (Search-Frontend-Cache) | localhost:11211 |
 
-Konfiguration: [config/tempo.yaml](config/tempo.yaml) — Beachte: `block_retention: 1h` und `max_block_duration: 5m` sind bewusst niedrig für den Demo-/Dev-Betrieb gesetzt. In Produktion deutlich höher konfigurieren.
+Konfiguration: [config/tempo.yaml](config/tempo.yaml) — Beachte: `block_retention: 24h` und `max_block_duration: 5m` sind bewusst niedrig für den Demo-/Dev-Betrieb gesetzt. In Produktion deutlich höher konfigurieren.
+
+Dieser Stack läuft als **Tempo-Monolith** (`storage.trace.backend: local`, keine separaten Microservices, kein Kafka-basiertes Ingestion). Teile der offiziellen Tempo-Doku beziehen sich auf die Microservices-Architektur (`live-store`, `block-builder`, Kafka-Konsumenten) ab Tempo 3.x — diese Hinweise sind für dieses Setup **nicht relevant** und wurden unten bewusst weggelassen.
 
 ---
 
@@ -35,33 +37,42 @@ Konfiguration: [config/tempo.yaml](config/tempo.yaml) — Beachte: `block_retent
 Reihenfolge von der Quelle bis zur Anzeige durchgehen (Instrumentierte App → Alloy → Tempo → Grafana):
 
 1. **Erzeugt die Anwendung überhaupt Spans?**
-   - Sampling-Konfiguration in der App/SDK prüfen (z. B. `parentbased_traceidratio`)
+   - Sampling-Konfiguration in der App/SDK prüfen (z. B. `parentbased_traceidratio`) — der Standard-Sampler vieler SDKs samplet nur 1:1000, was in Dev-Umgebungen leicht als "keine Traces" missverstanden wird
    - Bei `k6-tracing`: läuft der Container? `docker compose logs k6-tracing`
 
 2. **Kommen Spans bei Alloy an?**
    - Alloy UI (http://localhost:12345) → Komponente für OTLP-Receiver prüfen
-   - Alloy-Metriken abfragen (über Prometheus, Datasource "prometheus"):
+   - Alloy-Metriken abfragen (über Prometheus, Datasource "prometheus", oder direkt `curl -s http://localhost:12345/metrics`):
      ```promql
-     rate(receiver_refused_spans_ratio_total[5m])
-     rate(exporter_send_failed_spans_ratio_total[5m])
+     rate(receiver_accepted_spans_ratio_total[5m])   # otelcol.receiver.otlp — sollte > 0 sein
+     rate(receiver_refused_spans_ratio_total[5m])    # sollte 0 sein
+     rate(exporter_sent_spans_ratio_total[5m])       # otelcol.exporter.otlp — sollte > 0 sein
+     rate(exporter_send_failed_spans_ratio_total[5m]) # sollte 0 sein
      ```
-     Beide sollten `0` sein. Werte > 0 bedeuten: Alloy verwirft Spans oder kann sie nicht an Tempo weiterleiten.
+     `refused`/`send_failed` > 0 bedeutet: Alloy verwirft Spans oder kann sie nicht an Tempo weiterleiten. Bleiben alle vier Metriken bei `0`, kommen bei Alloy überhaupt keine Spans an → Ursache liegt bei Schritt 1 (App) oder Netzwerk/Endpunkt.
 
-3. **Kommen Spans bei Tempo an?**
+3. **Kommen Spans bei Tempo an (Distributor)?**
    - Tempo-Metrik prüfen:
      ```promql
-     rate(tempo_receiver_refused_spans[5m])
-     rate(tempo_discarded_spans_total[5m])
+     rate(tempo_distributor_spans_received_total[5m])  # sollte > 0 sein
+     rate(tempo_receiver_refused_spans[5m])             # sollte 0 sein
+     rate(tempo_discarded_spans_total[5m])              # sollte 0 sein, Label "reason" zeigt Grund
      ```
-     `tempo_receiver_refused_spans > 0` → Rate-Limiting oder Overrides greifen (`max_bytes_per_trace`, `max_traces_per_user` in `overrides:`).
-   - Distributor-Logs auf `pusher failed to consume trace data` prüfen → deutet auf überschrittenes Trace-Size-Limit hin.
+   - Ist `tempo_distributor_spans_received_total` dauerhaft `0`, prüfen ob Protokoll/Port stimmt (Schritt 4) — noch nichts kommt beim Distributor an.
+   - Bei Rate-Limiting loggt der Distributor exakt:
+     ```
+     rpc error: code = ResourceExhausted desc = RATE_LIMITED: ingestion rate limit (30000000 bytes) exceeded while adding 10 bytes
+     ```
+     → `overrides:` Limits (`max_bytes_per_trace`, `max_traces_per_user`, Ingestion-Rate) prüfen/erhöhen.
+   - Distributor-Logs auf `pusher failed to consume trace data" err="context canceled"` prüfen → deutet meist auf einen Client-seitigen Verbindungsabbruch hin, nicht auf ein Tempo-Problem.
+   - Für Detail-Debugging temporär `distributor.log_discarded_spans.enabled: true` (optional `include_all_attributes: true`) in `config/tempo.yaml` setzen — Tempo loggt dann pro verworfenem Span `msg=discarded spanid=... traceid=...` inkl. Grund. Nach dem Debuggen wieder deaktivieren (Log-Volumen!).
 
 4. **Falsches Protokoll/Port?**
    - OTLP gRPC (`4317`) vs. OTLP HTTP (`4318`) nicht verwechseln — häufigste Fehlerquelle bei neu instrumentierten Apps.
    - Container-interne Anwendungen müssen an `tempo:4317`/`alloy:4317` senden (Service-Name im Docker-Netzwerk), nicht `localhost`.
 
 5. **Sind die Traces schon wieder abgelaufen?**
-   - `block_retention: 1h` in diesem Stack → alte Traces sind nach einer Stunde weg. Bei "Trace war gestern da, heute nicht mehr" ist das meist die Ursache, kein Bug.
+   - `block_retention: 24h` in diesem Stack → alte Traces sind nach 24 Stunden weg. Bei "Trace war vorgestern da, heute nicht mehr" ist das meist die Ursache, kein Bug.
 
 6. **Grafana-Datasource-Problem?**
    - Tempo-Datasource-URL muss auf den **HTTP-Port 3200** zeigen, nicht auf gRPC (9095) — Grafana leitet die gRPC-Verbindung intern vom HTTP-Endpunkt ab.
@@ -74,12 +85,19 @@ Reihenfolge von der Quelle bis zur Anzeige durchgehen (Instrumentierte App → A
 | Symptom | Wahrscheinliche Ursache | Maßnahme |
 |---|---|---|
 | Tempo-Container startet nicht / crasht sofort | Volume-Permission auf `tempo-data` (Tempo läuft als User `10001`) | Prüfen ob `init`-Container erfolgreich lief: `docker compose logs init`. Ggf. `docker compose up -d init` erneut ausführen |
-| `error using pageFinder` bei Suche (HTTP 500) | Korrupter oder inkonsistenter Block im lokalen Storage | Tempo-Logs auf Compactor-Fehler prüfen; betroffenen Block ggf. aus `tempo-data`-Volume entfernen (Datenverlust für diesen Block) |
+| `rpc error: ... RATE_LIMITED: ingestion rate limit (...) exceeded` beim Senden | Ingestion-Rate-Limit im Distributor erreicht | Ingestion-Rate in `overrides:` erhöhen, oder Sende-Last reduzieren (Sampling in der App). Diagnose: `distributor.log_discarded_spans.enabled: true` setzen für Details pro Span |
+| `error using pageFinder` bei Suche (HTTP 500), genauer: `error querying store in Querier.FindTraceByID: error using pageFinder...` | Korrupter/inkonsistenter Block im lokalen Storage (z. B. unvollständiger Schreibvorgang) | Betroffenen Block identifizieren (Pfad-Schema `<tenant>/<block-id>` unter `/var/tempo/blocks`), Tempo-Container stoppen, Block-Verzeichnis aus dem Volume löschen, Container neu starten. **Datenverlust nur für diesen Block** — bereits im WAL vorhandene, noch nicht kompaktierte Daten bleiben erhalten |
+| `queue doesn't have room for 100 jobs` / `failed to add a job to work queue` bei der Compaction | Compactor-Queue-Kapazität erschöpft relativ zur Workload (viele/große Blöcke) | Metriken prüfen: `tempodb_compaction_bytes_written_total` (>0 = Worker arbeitet), `tempodb_compaction_errors_total` (>0 = Fehler in Compactor-Logs suchen). Danach `storage.trace.pool.queue_depth` (Default reicht selten für Lastspitzen) und `compactor.compaction.max_block_bytes`/`max_compaction_objects` anpassen |
 | `too many jobs in the queue` / HTTP 429 bei Suche | Query-Frontend-Kapazität erschöpft (viele parallele/teure Suchen) | Zeitraum der Suche eingrenzen, `duration_slo`/`throughput_bytes_slo` in `query_frontend` prüfen, Suchlast reduzieren |
+| Service-Name-/Span-Name-Dropdown in Grafana Explore leer ("No options found", kein Fehler) | Tag-Value-Query überschreitet `max_bytes_per_tag_values_query`-Limit → Tempo liefert stillschweigend ein leeres Ergebnis statt eines Fehlers (Endpunkt `/api/search/tag/service.name/values`) | Anzahl/Kardinalität der abgefragten Tag-Werte reduzieren; `max_bytes_per_tag_values_query` in `overrides:` erhöhen (Richtwert ~50MB) |
+| `500 Internal Server Error: response larger than the max (<size> vs <limit>)` | gRPC-Message-Size-Limit überschritten, meist zwischen Querier und Query-Frontend bei großen Suchergebnissen | Je nach betroffener Komponente erhöhen: `query_frontend.max_grpc_streaming_packet_size` (Default 2 MiB) für Streaming-Antworten, `server.grpc_server_max_recv_msg_size`/`grpc_server_max_send_msg_size` (gilt pro Prozess, nicht global synchronisiert — ggf. in mehreren Komponenten setzen), `querier.frontend_worker.grpc_client_config.max_send_msg_size`; bei OTLP-Ingest zusätzlich `distributor.receivers.otlp.protocols.grpc.max_recv_msg_size_mib` prüfen |
 | Service-Graph/Span-Metrics fehlen in Grafana | Metrics-Generator schreibt nicht erfolgreich zu Prometheus | `docker compose logs tempo \| grep -i "remote write"`; prüfen ob Prometheus mit `--web.enable-remote-write-receiver` läuft (ist in diesem Stack Standard); ~2 Minuten Vorlaufzeit nach Start abwarten |
-| Trace-Suche zeigt inkonsistente Ergebnisse bei langlaufenden Traces | Trace erstreckt sich über mehrere Blöcke (durch `max_block_duration: 5m`) | Erwartetes Verhalten bei kurzem `max_block_duration`; für Produktion höher konfigurieren |
-| Hoher Speicherverbrauch / OOM bei Tempo | Sehr große einzelne Spans/Attribute oder zu viele parallele Traces im Head-Block | `max_attribute_bytes` / Span-Size-Limits in den `overrides` setzen; Ressourcenlimits im Compose-File erhöhen |
-| Grafana zeigt "no data" nur bei Service Graph | Zu kurze Wartezeit nach Deploy | Service Graphs brauchen laut Doku ca. 2 Minuten Anlaufzeit, bevor Daten erscheinen |
+| Grafana zeigt "no data" nur bei Service Graph | Zu kurze Wartezeit nach Deploy, oder Edges laufen ab bevor der passende Gegenpart ankommt | Service Graphs brauchen laut Doku ca. 2 Minuten Anlaufzeit. Bei anhaltendem Problem Metrik `tempo_metrics_generator_processor_service_graphs_expired_edges` prüfen — hohe Rate bedeutet, `metrics_generator.processor.service_graphs.wait` (Default 10s) ist zu knapp bemessen |
+| Span-Metrics/Service-Graph-Kardinalität explodiert (viele Zeitreihen in Prometheus) | Hochkardinale Labels wie `span_name` oder `url` aus dem Metrics-Generator (in diesem Stack aktiv: `processors: [service-graphs, span-metrics, local-blocks]`) | Rate prüfen mit `sum by (tenant, label_name) (rate(tempo_metrics_generator_registry_label_values_limited_total[5m]))`; `overrides.defaults.metrics_generator.max_cardinality_per_label` setzen (überzählige Werte werden zu `__cardinality_overflow__`), alternativ `span_name_sanitization: dry_run` testen und dann aktivieren |
+| Trace-Suche zeigt inkonsistente Ergebnisse bei langlaufenden Traces | Trace erstreckt sich über mehrere Blöcke (durch `max_block_duration: 5m`) — TraceQL berücksichtigt bei Spanset-Operatoren laut Doku nur den zusammenhängenden Trace-Anteil im aktuellen Block | Erwartetes Verhalten bei kurzem `max_block_duration`; für Produktion höher konfigurieren. Zusätzlich Metrik `tempo_warnings_total{reason="disconnected_trace_flushed_to_wal"}` bzw. `rootless_trace_flushed_to_wal` beobachten — deutet auf Spans mit fehlendem Parent bzw. fehlendem Root-Span hin (oft Instrumentierungsfehler) |
+| Hoher Speicherverbrauch / OOM bei Tempo | Einzelne sehr große Span-Attribute (>2048 Byte, Default von `max_attribute_bytes`), sehr lange/große Traces (100K–1M Spans) oder hochkardinale große Attribute | `max_attribute_bytes` in `overrides` setzen (Attribute werden dann getruncated, sichtbar über Metrik `tempo_distributor_attributes_truncated_total`); `max_bytes_per_trace` pro Tenant in `overrides` begrenzen (Empfehlung: mit 15MB starten, max. 60MB); alternativ große Attribute schon im OTel Collector/Alloy per Attribute-Processor entfernen |
+
+Hinweis: Die offizielle Doku beschreibt zusätzlich Consumer-Lag-Probleme (`tempo_ingest_group_partition_lag`) zwischen Distributor und `live-store`/`block-builder`. Das betrifft nur Tempo-3.x-Deployments mit Kafka-basierter Ingestion und ist für diesen Docker-Compose-Monolithen **nicht relevant**.
 
 ---
 
@@ -171,9 +189,9 @@ Bezug: [kubernetes.md](kubernetes.md). Apps im Cluster senden Traces **nicht** a
 
 ## Links
 
+Die relevanten Fehlerbilder aus der offiziellen Doku sind oben in Abschnitt 2/3 bereits inhaltlich eingearbeitet. Als Ausgangspunkt für Themen, die über dieses Runbook hinausgehen (z. B. Tempo-3.x-Microservices-Betrieb mit Kafka):
+
 - [Kubernetes-Anbindung dieses Stacks](kubernetes.md)
-- [Troubleshoot Tempo (offizielle Doku)](https://grafana.com/docs/tempo/latest/troubleshooting/)
-- [Unable to find traces](https://grafana.com/docs/tempo/latest/troubleshooting/querying/unable-to-see-trace/)
+- [Troubleshoot Tempo (offizielle Doku, Index)](https://grafana.com/docs/tempo/latest/troubleshooting/)
 - [Troubleshoot Tempo data source in Grafana](https://grafana.com/docs/grafana/latest/datasources/tempo/troubleshooting/)
 - [Tempo Runbook (GitHub)](https://github.com/grafana/tempo/blob/main/operations/tempo-mixin/runbook.md)
-- [Tempo Getting Started (Docker Example)](https://grafana.com/docs/tempo/latest/getting-started/docker-example/)
