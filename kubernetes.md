@@ -126,6 +126,42 @@ kubectl -n monitoring logs -l app=alloy --tail=50
 
 ---
 
+## Helm-Chart
+
+Alternativ zu den einzelnen YAML-Dateien unter [kubernetes/](kubernetes/) steht derselbe Deploy als Helm-Chart unter [helm/alloy-lgtm/](helm/alloy-lgtm/) zur Verfügung. Der Chart erzeugt exakt dieselben Ressourcen (Namespace, RBAC, ConfigMap, DaemonSet, optional Istio) und macht `<LGTM-HOST>` sowie Istio als Werte konfigurierbar statt per `sed`.
+
+### Werte
+
+| Key | Default | Bedeutung |
+|---|---|---|
+| `namespace` | `monitoring` | Ziel-Namespace |
+| `lgtmHost` | `192.168.1.100` | Host des externen LGTM-Stacks |
+| `alloy.image` | `grafana/alloy:v1.15.1` | Alloy-Image |
+| `istio.enabled` | `true` | Namespace-Label `istio-injection: enabled`, Envoy-Metriken in der Alloy-Config, `Service/alloy-otlp` + `Telemetry`-Ressourcen |
+| `istio.samplingPercentage` | `10` | Trace-Sampling-Rate |
+| `istio.installMeshConfigPatch` | `false` | Deployt die ConfigMap `istio` in `istio-system` mit — **überschreibt bestehende `extensionProviders`**, vorher `kubectl get cm istio -n istio-system -o yaml` prüfen |
+
+### Anwenden
+
+```bash
+helm install alloy helm/alloy-lgtm \
+  --set lgtmHost=192.168.1.100 \
+  --set istio.enabled=true
+
+# Status prüfen
+kubectl -n monitoring get pods -l app=alloy
+```
+
+Ohne Istio (z. B. Cluster ohne Service Mesh):
+
+```bash
+helm install alloy helm/alloy-lgtm \
+  --set lgtmHost=192.168.1.100 \
+  --set istio.enabled=false
+```
+
+---
+
 ## Apps instrumentieren
 
 Alloy läuft bereits — Entwickler müssen nur ihr Deployment entsprechend kennzeichnen. Keine zentrale Konfigurationsänderung nötig.
