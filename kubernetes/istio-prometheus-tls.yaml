@@ -1,0 +1,74 @@
+# Optional: TLS-Origination für externen Prometheus (remote_write), falls dieser HTTPS spricht.
+# Envoy (istio-proxy Sidecar) übernimmt TLS-Handshake + Zertifikatsprüfung gegen die CA im
+# Secret unten. Alloy selbst sendet weiterhin plain HTTP an <LGTM-HOST>:9090 (siehe configmap.yaml)
+# — der Trust liegt vollständig in Istio, nicht in der Alloy-Config.
+#
+# Voraussetzung: Secret mit der CA im monitoring-Namespace anlegen (Key muss "ca.crt" heißen):
+#   kubectl create secret generic prometheus-ca-cert -n monitoring --from-file=ca.crt=ca/ca.pem
+#
+# <LGTM-HOST> vor dem Anwenden ersetzen (wie bei configmap.yaml):
+#   sed -i 's/<LGTM-HOST>/192.168.178.91/g' kubernetes/istio-prometheus-tls.yaml
+
+# Erlaubt dem istio-proxy Sidecar (läuft unter der ServiceAccount "alloy"), das CA-Secret
+# per SDS zu lesen. Bewusst auf genau dieses eine Secret beschränkt (resourceNames).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alloy-tls-secrets
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [prometheus-ca-cert]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alloy-tls-secrets
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alloy-tls-secrets
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: monitoring
+---
+# ServiceEntry: Alloy spricht <LGTM-HOST>:9090 per IP direkt an (kein DNS-Name nötig).
+# "addresses" + resolution: NONE fängt Traffic anhand der Ziel-IP ab (Istio-Pattern für
+# TLS-Origination zu einer reinen IP-Adresse).
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: external-prometheus
+  namespace: monitoring
+spec:
+  hosts:
+    - prometheus.lgtm.external
+  addresses:
+    - <LGTM-HOST>/32
+  location: MESH_EXTERNAL
+  ports:
+    - number: 9090
+      name: http-prometheus
+      protocol: HTTP
+  resolution: NONE
+---
+# DestinationRule: originiert TLS zum externen Prometheus und validiert dessen Zertifikat
+# gegen die CA aus dem Secret "prometheus-ca-cert".
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: prometheus-tls-origination
+  namespace: monitoring
+spec:
+  host: prometheus.lgtm.external
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9090
+        tls:
+          mode: SIMPLE
+          credentialName: prometheus-ca-cert

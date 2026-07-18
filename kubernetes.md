@@ -106,6 +106,7 @@ Alloy öffnet einen OTLP-Receiver (gRPC :4317, HTTP :4318) auf jedem Node. Apps 
 | [kubernetes/configmap-with-istio.yaml](kubernetes/configmap-with-istio.yaml) | Alloy-Konfiguration inkl. Istio Envoy-Metriken (optional) |
 | [kubernetes/daemonset.yaml](kubernetes/daemonset.yaml) | Alloy DaemonSet (1x pro Node) |
 | [kubernetes/istio.yaml](kubernetes/istio.yaml) | Istio-Integration (optional, siehe unten) |
+| [kubernetes/istio-prometheus-tls.yaml](kubernetes/istio-prometheus-tls.yaml) | TLS-Origination für HTTPS-Prometheus (optional, siehe unten) |
 
 ### Anwenden
 
@@ -122,6 +123,14 @@ kubectl apply -f kubernetes/daemonset.yaml
 # 3. Status prüfen
 kubectl -n monitoring get pods -l app=alloy
 kubectl -n monitoring logs -l app=alloy --tail=50
+```
+
+Bei Änderungen an [kubernetes/configmap.yaml](kubernetes/configmap.yaml) oder [kubernetes/rbac.yaml](kubernetes/rbac.yaml) übernehmen die Alloy-Pods die neue Config nicht automatisch — `kubectl apply` ändert nur die Ressourcen, das DaemonSet-Pod-Template bleibt gleich. Reroll manuell erzwingen:
+
+```bash
+kubectl apply -f kubernetes/configmap.yaml
+kubectl -n monitoring rollout restart daemonset/alloy
+kubectl -n monitoring rollout status daemonset/alloy
 ```
 
 ---
@@ -145,7 +154,7 @@ Alternativ zu den einzelnen YAML-Dateien unter [kubernetes/](kubernetes/) steht 
 
 ```bash
 helm install alloy helm/alloy-lgtm \
-  --set lgtmHost=192.168.1.100 \
+  --set lgtmHost=192.168.1.91 \
   --set istio.enabled=true
 
 # Status prüfen
@@ -156,9 +165,138 @@ Ohne Istio (z. B. Cluster ohne Service Mesh):
 
 ```bash
 helm install alloy helm/alloy-lgtm \
-  --set lgtmHost=192.168.1.100 \
+  --set lgtmHost=192.168.1.91 \
   --set istio.enabled=false
 ```
+
+### Aktualisieren
+
+Bei Änderungen am Chart (z. B. RBAC, Config, Werte) reicht `helm upgrade` — der Namespace bleibt dabei erhalten, nur die geänderten Ressourcen werden aktualisiert:
+
+```bash
+helm upgrade alloy helm/alloy-lgtm \
+  --set lgtmHost=192.168.178.91 \
+  --set istio.enabled=true
+
+# Status prüfen
+helm status alloy -n monitoring
+kubectl -n monitoring rollout restart daemonset/alloy
+kubectl -n monitoring rollout status daemonset/alloy
+```
+
+Das DaemonSet trägt eine `checksum/config`-Annotation (Hash der ConfigMap-Templates). Ändert sich die Config über `--set`, ändert sich der Hash, und Kubernetes rollt die Pods automatisch neu — kein manueller Restart nötig.
+
+`--install` kombiniert Install und Upgrade in einem Befehl (idempotent, z. B. für CI):
+
+```bash
+helm upgrade --install alloy helm/alloy-lgtm \
+  --set lgtmHost=192.168.178.91 \
+  --set istio.enabled=true
+```
+
+### Prometheus per TLS (Istio TLS-Origination)
+
+Spricht der externe Prometheus HTTPS, muss Alloy dessen Zertifikat vertrauen. Statt den Trust in der Alloy-Config zu verdrahten (`tls_config` + gemountetes CA-Cert), übernimmt hier **Istio** die TLS-Origination: Alloy sendet weiterhin plain HTTP an `<LGTM-HOST>:9090` (unverändert in [kubernetes/configmap.yaml](kubernetes/configmap.yaml)), der istio-proxy Sidecar fängt den Traffic per `ServiceEntry`/`DestinationRule` ab, baut selbst die TLS-Verbindung auf und prüft das Zertifikat gegen eine CA aus einem Secret. Der Trust liegt damit vollständig in Istio, nicht in Alloy.
+
+Voraussetzung: CA-Zertifikat des externen Prometheus als Secret im `monitoring`-Namespace (Key muss `ca.crt` heißen):
+
+```bash
+kubectl create secret generic prometheus-ca-cert -n monitoring --from-file=ca.crt=ca/ca.pem
+```
+
+**Raw Manifests:**
+
+```bash
+sed -i 's/<LGTM-HOST>/192.168.178.91/g' kubernetes/istio-prometheus-tls.yaml
+kubectl apply -f kubernetes/istio-prometheus-tls.yaml
+```
+
+**Helm:**
+
+```bash
+helm upgrade --install alloy helm/alloy-lgtm \
+  --set lgtmHost=192.168.178.91 \
+  --set istio.enabled=true \
+  --set istio.prometheusTls.enabled=true
+```
+
+Beide Varianten legen zusätzlich eine `Role`/`RoleBinding` an, die dem istio-proxy Sidecar (läuft unter der ServiceAccount `alloy`) per SDS lesenden Zugriff auf genau dieses eine Secret erlaubt — sonst kann Envoy die CA nicht laden.
+
+**Verifikation:**
+
+```bash
+kubectl -n monitoring logs -l app=alloy -c istio-proxy --tail=50 | grep -i prometheus
+kubectl -n monitoring logs -l app=alloy --tail=20 | grep -i "remote_write\|Failed to send batch"
+```
+
+Kein `Failed to send batch` mehr in den Alloy-Logs → die TLS-Origination funktioniert.
+
+> **Hinweis:** Unabhängig vom TLS-Trust muss die Ziel-IP aus dem Cluster heraus überhaupt erreichbar sein (reine TCP-Verbindung, vor jeder TLS-Prüfung). Das lässt sich isoliert testen mit:
+> ```bash
+> POD=$(kubectl -n monitoring get pods -l app=alloy -o jsonpath='{.items[0].metadata.name}')
+> kubectl -n monitoring exec "$POD" -c istio-proxy -- curl -sv --max-time 5 https://<LGTM-HOST>:9090/-/healthy
+> ```
+> Ein `Connection timed out` hier deutet auf ein Netzwerk-/Firewall-Problem zwischen Cluster und LGTM-Host hin, nicht auf TLS/Trust.
+
+---
+
+## Verifikation
+
+Nach dem Deployment (egal ob per `kubectl apply` oder Helm) in drei Schritten prüfen: läuft das Deployment, greift Istio wie erwartet, kommen Daten im LGTM-Stack an.
+
+### 1. Deployment-Check
+
+```bash
+# Helm-Release-Status (nur bei Helm-Deploy)
+helm status alloy -n monitoring
+
+# Namespace-Label prüfen
+kubectl get ns monitoring --show-labels
+
+# Läuft ein Alloy-Pod pro Node?
+kubectl -n monitoring get pods -l app=alloy -o wide
+kubectl get nodes --no-headers | wc -l
+
+# Logs auf Fehler prüfen
+kubectl -n monitoring logs -l app=alloy --tail=50
+```
+
+Alloy hat eine eigene UI mit Pipeline-Graph — Port-Forward und im Graph-Tab auf rot markierte (fehlerhafte) Komponenten achten:
+
+```bash
+kubectl -n monitoring port-forward svc/alloy-otlp 12345:12345
+# http://localhost:12345 öffnen
+```
+
+### 2. Istio-Check
+
+Nur relevant, wenn im Cluster tatsächlich eine Istio-Control-Plane installiert ist und `istio.enabled=true` gesetzt wurde.
+
+```bash
+# Konfigurationsfehler/Warnungen mesh-weit prüfen
+istioctl analyze -n monitoring
+
+# Sidecar-Injection prüfen: enthält ein Pod den Container "istio-proxy"?
+kubectl -n monitoring get pods -o jsonpath='{.items[*].spec.containers[*].name}'
+
+# Telemetry-Ressourcen vorhanden?
+kubectl -n istio-system get telemetry
+```
+
+> **Hinweis:** Das Namespace-Label `istio-injection: enabled` gilt für den gesamten `monitoring`-Namespace — also auch für die Alloy-Pods selbst. Da Alloy per Host-Network die kubelet-API abfragt und `/var/log` direkt liest, ist ein Envoy-Sidecar in den Alloy-Pods meist nicht gewünscht. Falls das vermieden werden soll, `sidecar.istio.io/inject: "false"` als Pod-Annotation im DaemonSet ergänzen.
+
+`istioctl analyze` meldet u. a. Warnungen zur Port-Namenskonvention (`IST0118`), wenn Service-Ports nicht mit einem erkannten Protokoll-Präfix beginnen (`grpc-`, `http-`, `tcp-`, …). Die Ports von `Service/alloy-otlp` heißen deshalb `grpc-otlp` (4317) und `http-otlp` (4318) — ohne korrektes Präfix behandelt Istio den Traffic als generisches TCP und es fehlt L7-Telemetrie/Routing für diesen Port.
+
+### 3. Data-Check
+
+- **Metriken:** Prometheus-Targets unter `http://<LGTM-HOST>:9090/targets` — Jobs `kubelet`, `cadvisor` und (bei aktiviertem Istio) `istio_envoy` müssen `UP` sein.
+- **Envoy/Mesh-Metriken:** Grafana → Explore → Prometheus, z. B. `envoy_cluster_upstream_rq_total` abfragen — liefert erst Daten, sobald echter Traffic durch einen istio-injizierten App-Namespace läuft.
+- **Logs:** Grafana → Explore → Loki:
+  ```
+  {namespace="monitoring", app="alloy"}
+  ```
+  bestätigt Alloys eigene Logs. Envoy Access-Logs (sobald `istio.installMeshConfigPatch=true` und `Telemetry/access-logs` aktiv sind) über `{namespace="istio-system"}` bzw. den jeweiligen App-Namespace abfragen.
+- **Traces:** eine Anfrage durch einen Mesh-Workload schicken, danach Grafana → Explore → Tempo nach dem Service-Namen suchen. Kommt nichts an: Erreichbarkeit von `http://<LGTM-HOST>:4317` aus einem Pod im Cluster testen (`curl` oder `otel-cli`).
 
 ---
 

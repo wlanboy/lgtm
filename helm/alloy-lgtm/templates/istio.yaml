@@ -1,0 +1,123 @@
+{{- if .Values.istio.enabled }}
+# Service: macht Alloy OTLP-Endpoint clusterweit erreichbar (für Istio Tracing)
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy-otlp
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: alloy
+  ports:
+    - name: grpc-otlp
+      port: 4317
+      targetPort: 4317
+    - name: http-otlp
+      port: 4318
+      targetPort: 4318
+---
+{{- if .Values.istio.installMeshConfigPatch }}
+# Istio MeshConfig: registriert Alloy als OpenTelemetry-Tracing-Provider.
+# Achtung: überschreibt bestehende extensionProviders der istio-ConfigMap in istio-system.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: istio
+  namespace: istio-system
+data:
+  mesh: |
+    extensionProviders:
+    - name: alloy-otlp
+      opentelemetry:
+        service: alloy-otlp.{{ .Values.namespace }}.svc.cluster.local
+        port: 4317
+---
+{{- end }}
+# Telemetry: aktiviert Tracing für alle Namespaces (mesh-weit).
+# Kann auf einzelne Namespaces eingeschränkt werden (metadata.namespace setzen).
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: tracing
+  namespace: istio-system
+spec:
+  tracing:
+    - providers:
+        - name: alloy-otlp
+      randomSamplingPercentage: {{ .Values.istio.samplingPercentage }}
+---
+# Telemetry: aktiviert strukturierte Access Logs für alle Workloads (JSON nach stdout).
+# Alloy liest diese über loki.source.kubernetes automatisch ein.
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: access-logs
+  namespace: istio-system
+spec:
+  accessLogging:
+    - providers:
+        - name: envoy
+---
+{{- if .Values.istio.prometheusTls.enabled }}
+# TLS-Origination für den externen Prometheus (remote_write): Envoy übernimmt TLS +
+# Zertifikatsprüfung, Alloy sendet weiterhin plain HTTP. Trust liegt in Istio, nicht in Alloy.
+# Voraussetzung: Secret {{ .Values.istio.prometheusTls.secretName }} muss im Namespace
+# {{ .Values.namespace }} existieren (Key "ca.crt").
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alloy-tls-secrets
+  namespace: {{ .Values.namespace }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ .Values.istio.prometheusTls.secretName }}]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alloy-tls-secrets
+  namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alloy-tls-secrets
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: external-prometheus
+  namespace: {{ .Values.namespace }}
+spec:
+  hosts:
+    - prometheus.lgtm.external
+  addresses:
+    - {{ .Values.lgtmHost }}/32
+  location: MESH_EXTERNAL
+  ports:
+    - number: 9090
+      name: http-prometheus
+      protocol: HTTP
+  resolution: NONE
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: prometheus-tls-origination
+  namespace: {{ .Values.namespace }}
+spec:
+  host: prometheus.lgtm.external
+  trafficPolicy:
+    portLevelSettings:
+      - port:
+          number: 9090
+        tls:
+          mode: SIMPLE
+          credentialName: {{ .Values.istio.prometheusTls.secretName }}
+{{- end }}
+{{- end }}

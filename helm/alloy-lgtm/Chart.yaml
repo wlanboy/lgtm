@@ -1,0 +1,6 @@
+apiVersion: v2
+name: alloy-lgtm
+description: Grafana Alloy DaemonSet that ships Kubernetes logs, metrics and traces (incl. optional Istio) to an external LGTM stack
+type: application
+version: 0.1.0
+appVersion: "1.15.1"

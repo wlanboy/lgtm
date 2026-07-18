@@ -8,10 +8,10 @@ spec:
   selector:
     app: alloy
   ports:
-    - name: otlp-grpc
+    - name: grpc-otlp
       port: 4317
       targetPort: 4317
-    - name: otlp-http
+    - name: http-otlp
       port: 4318
       targetPort: 4318
 ---

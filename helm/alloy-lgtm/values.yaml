@@ -1,0 +1,25 @@
+# Namespace, in dem Alloy deployed wird
+namespace: monitoring
+
+# Host des externen LGTM-Stacks (ersetzt <LGTM-HOST> aus kubernetes/configmap*.yaml)
+lgtmHost: 192.168.178.91
+
+alloy:
+  image: grafana/alloy:v1.15.1
+
+istio:
+  # aktiviert istio-injection Label am Namespace, Envoy-Metriken in der Alloy-Config
+  # sowie Service/Telemetry-Ressourcen aus kubernetes/istio.yaml
+  enabled: true
+  # Sampling-Rate für Traces (100 = alle Traces, für Produktion z.B. 10 empfehlenswert)
+  samplingPercentage: 10
+  # Patcht die bestehende ConfigMap "istio" in istio-system (überschreibt extensionProviders!).
+  # Vor Aktivierung bestehende Mesh-Config prüfen: kubectl get cm istio -n istio-system -o yaml
+  installMeshConfigPatch: false
+  # TLS-Origination für den externen Prometheus (remote_write), falls dieser HTTPS spricht.
+  # Envoy übernimmt TLS + Zertifikatsprüfung, Alloy sendet weiterhin plain HTTP.
+  # Voraussetzung: Secret mit der CA vorher anlegen (Key muss "ca.crt" heißen):
+  #   kubectl create secret generic prometheus-ca-cert -n monitoring --from-file=ca.crt=ca/ca.pem
+  prometheusTls:
+    enabled: false
+    secretName: prometheus-ca-cert
